@@ -1,6 +1,6 @@
 
-import { jsPDF } from "jspdf";
-import autoTable from 'jspdf-autotable';
+import { jsPDF } from "https://esm.sh/jspdf@2.5.1";
+import autoTable from 'https://esm.sh/jspdf-autotable@3.8.2';
 import { GeneratedExam } from "../types.ts";
 
 export const generateExamPdf = (exam: GeneratedExam) => {
