@@ -1,25 +1,28 @@
 
 export const ASIGNATURAS = [
-  "Matemáticas",
-  "Lengua y Literatura",
-  "Ciencias Naturales",
-  "Ciencias Sociales",
-  "Historia",
-  "Geografía",
-  "Inglés",
-  "Educación Física",
-  "Educación Artística",
-  "Tecnología",
-  "Ética y Ciudadanía"
+  "Fundamentos de Gestión",
+  "Organización y Gestión",
+  "Procesos Productivos",
+  "Marco Jurídico",
+  "Organización y Gestión Comercial",
+  "Economía",
+  "Derecho",
+  "OCL",
+  "Administración III"
 ];
 
 export const CURSOS = [
-  "1º Primaria",
-  "2º Primaria",
-  "3º Primaria",
-  "4º Primaria",
-  "5º Primaria",
-  "6º Primaria",
-  "1º ESO",
-  "2º ESO"
+  "3A", 
+  "4A", 
+  "4C", 
+  "4D", 
+  "5D", 
+  "5A", 
+  "6B", 
+  "6A"
+];
+
+export const COLEGIOS = [
+  "EETP N°602",
+  "EESO N°206"
 ];
