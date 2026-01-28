@@ -1,5 +1,5 @@
 
-import React, { useState, useMemo } from 'react';
+import React, { useState, useMemo } from 'https://esm.sh/react@19.0.0';
 import { 
   FileUp, 
   Download, 
@@ -14,8 +14,8 @@ import {
   Edit3,
   RefreshCw,
   Search
-} from 'lucide-react';
-import * as XLSX from 'xlsx';
+} from 'https://esm.sh/lucide-react@0.475.0';
+import * as XLSX from 'https://esm.sh/xlsx@0.18.5';
 import { ASIGNATURAS, CURSOS, COLEGIOS } from './constants.ts';
 import { Question, ExamConfig, GeneratedExam } from './types.ts';
 import { generateExamPdf } from './services/pdfService.ts';
