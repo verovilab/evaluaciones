@@ -1,5 +1,5 @@
 
-import { GoogleGenAI } from "@google/genai";
+import { GoogleGenAI } from "https://esm.sh/@google/genai@1.3.0";
 
 const ai = new GoogleGenAI({ apiKey: process.env.API_KEY });
 
