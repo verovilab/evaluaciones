@@ -41,7 +41,7 @@ export const generateExamPdf = (exam: GeneratedExam) => {
   // Questions
   let currentY = 85;
   questions.forEach((q, index) => {
-    if (currentY > 260) {
+    if (currentY > 270) {
       doc.addPage();
       currentY = 20;
     }
@@ -52,14 +52,8 @@ export const generateExamPdf = (exam: GeneratedExam) => {
     const splitQuestion = doc.splitTextToSize(questionText, 180);
     doc.text(splitQuestion, 15, currentY);
     
-    currentY += (splitQuestion.length * 6) + 10;
-    
-    // Lines for answer
-    doc.setDrawColor(220);
-    doc.line(20, currentY, 190, currentY);
-    currentY += 8;
-    doc.line(20, currentY, 190, currentY);
-    currentY += 12;
+    // Solo dejamos espacio entre preguntas, sin líneas
+    currentY += (splitQuestion.length * 7) + 8;
   });
 
   // Footer page numbering
