@@ -1,0 +1,5 @@
+{
+  "name": "EduGen - Generador de Evaluaciones",
+  "description": "Una herramienta profesional para docentes que permite cargar bancos de preguntas desde CSV, seleccionar asignaturas y cursos, y generar exámenes aleatorios en PDF listos para imprimir.",
+  "requestFramePermissions": []
+}
