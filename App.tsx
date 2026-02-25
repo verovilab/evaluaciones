@@ -1,5 +1,4 @@
-
-import React, { useState, useMemo } from 'https://esm.sh/react@19.0.0';
+import React, { useState, useCallback, useMemo } from 'react';
 import { 
   FileUp, 
   Download, 
@@ -9,465 +8,458 @@ import {
   AlertCircle,
   CheckCircle2,
   Trash2,
-  Sparkles,
-  FileSpreadsheet,
-  Edit3,
-  RefreshCw,
-  Search,
+  BrainCircuit,
   CheckSquare,
-  Square,
-  Save,
-  X
-} from 'https://esm.sh/lucide-react@0.475.0';
-import * as XLSX from 'https://esm.sh/xlsx@0.18.5';
-import { ASIGNATURAS, CURSOS, COLEGIOS } from './constants.ts';
-import { Question, ExamConfig, GeneratedExam } from './types.ts';
-import { generateExamPdf } from './services/pdfService.ts';
-import { reviewAndFix, createAlternativeVersion } from './services/geminiService.ts';
+  List
+} from 'lucide-react';
+import { ASIGNATURAS, CURSOS } from './constants';
+import { Question, ExamConfig, GeneratedExam } from './types';
+import { generateExamPdf } from './services/pdfService';
+import { improveQuestion } from './services/geminiService';
 
+// ─── CSV Parser ───────────────────────────────────────────────────────────────
+function parseCSV(text: string): Question[] {
+  const lines = text.split('\n').filter(l => l.trim() !== '');
+  if (lines.length < 2) throw new Error('El CSV está vacío o no tiene datos.');
+
+  // Parse header respecting quoted fields
+  const parseRow = (row: string): string[] => {
+    const result: string[] = [];
+    let current = '';
+    let inQuotes = false;
+    for (let i = 0; i < row.length; i++) {
+      const ch = row[i];
+      if (ch === '"') {
+        if (inQuotes && row[i + 1] === '"') { current += '"'; i++; }
+        else inQuotes = !inQuotes;
+      } else if (ch === ',' && !inQuotes) {
+        result.push(current.trim());
+        current = '';
+      } else {
+        current += ch;
+      }
+    }
+    result.push(current.trim());
+    return result;
+  };
+
+  const rawHeaders = parseRow(lines[0]).map(h => h.toLowerCase().replace(/^"|"$/g, ''));
+
+  // Detect CSV format
+  const isMultipleChoice = rawHeaders.includes('option a') || rawHeaders.includes('opcion_a') || rawHeaders.includes('opción a');
+  const isSimple = rawHeaders.includes('pregunta') && rawHeaders.includes('respuesta');
+
+  if (!isMultipleChoice && !isSimple) {
+    throw new Error('Formato CSV no reconocido. Debe tener columnas "pregunta"/"respuesta" o "Question"/"Option A"/"Option B"/"Correct Answer".');
+  }
+
+  return lines.slice(1).map((line, idx) => {
+    const values = parseRow(line);
+    const get = (key: string) => {
+      const i = rawHeaders.indexOf(key);
+      return i >= 0 ? (values[i] || '').replace(/^"|"$/g, '').trim() : '';
+    };
+
+    if (isMultipleChoice) {
+      const correctRaw = get('correct answer') || get('respuesta_correcta') || '';
+      // Extract just the letter (A, B, C, D)
+      const correctLetter = correctRaw.replace(/^([ABCD])[\.\)].*/i, '$1').trim().toUpperCase();
+
+      return {
+        id: idx,
+        pregunta: get('question') || get('pregunta'),
+        respuesta: correctRaw,
+        respuestaCorrecta: correctLetter,
+        tipo: 'mc' as const,
+        opciones: {
+          a: get('option a') || get('opcion_a') || get('opción a'),
+          b: get('option b') || get('opcion_b') || get('opción b'),
+          c: get('option c') || get('opcion_c') || get('opción c'),
+          d: get('option d') || get('opcion_d') || get('opción d'),
+        },
+        justificacion: get('rationale') || get('justificacion') || get('justificación'),
+        tema: get('tema') || get('topic') || '',
+        dificultad: get('dificultad') || get('difficulty') || '',
+      } as Question;
+    } else {
+      const tipoRaw = get('tipo')?.toLowerCase();
+      const tipo = tipoRaw === 'vf' ? 'vf' : tipoRaw === 'mc' ? 'mc' : 'abierta';
+      return {
+        id: idx,
+        pregunta: get('pregunta'),
+        respuesta: get('respuesta'),
+        tipo: tipo as Question['tipo'],
+        tema: get('tema') || '',
+        dificultad: get('dificultad') || '',
+      } as Question;
+    }
+  }).filter(q => q.pregunta.trim() !== '');
+}
+
+// ─── Badge por tipo ────────────────────────────────────────────────────────────
+const TipoBadge: React.FC<{ tipo?: string }> = ({ tipo }) => {
+  if (!tipo || tipo === 'abierta') return (
+    <span className="bg-slate-100 text-slate-500 text-xs font-semibold px-2 py-1 rounded border border-slate-200 uppercase tracking-wider flex items-center gap-1">
+      <List className="w-3 h-3" /> Abierta
+    </span>
+  );
+  if (tipo === 'mc') return (
+    <span className="bg-purple-50 text-purple-600 text-xs font-semibold px-2 py-1 rounded border border-purple-100 uppercase tracking-wider flex items-center gap-1">
+      <CheckSquare className="w-3 h-3" /> Múltiple opción
+    </span>
+  );
+  if (tipo === 'vf') return (
+    <span className="bg-amber-50 text-amber-600 text-xs font-semibold px-2 py-1 rounded border border-amber-100 uppercase tracking-wider flex items-center gap-1">
+      <CheckSquare className="w-3 h-3" /> V / F
+    </span>
+  );
+  return null;
+};
+
+// ─── App ───────────────────────────────────────────────────────────────────────
 const App: React.FC = () => {
   const [csvData, setCsvData] = useState<Question[]>([]);
   const [loading, setLoading] = useState(false);
-  const [searchTerm, setSearchTerm] = useState('');
   const [error, setError] = useState<string | null>(null);
   const [success, setSuccess] = useState<string | null>(null);
-  const [processingId, setProcessingId] = useState<string | number | null>(null);
-  const [editingId, setEditingId] = useState<string | number | null>(null);
-  const [selectionMode, setSelectionMode] = useState<'random' | 'manual'>('random');
-  const [selectedIds, setSelectedIds] = useState<Set<string | number>>(new Set());
+  const [isImproving, setIsImproving] = useState<string | null>(null);
 
   const [config, setConfig] = useState<ExamConfig>({
     asignatura: ASIGNATURAS[0],
     curso: CURSOS[0],
     tema: '',
     cantidadPreguntas: 5,
-    nombreProfesor: 'Verónica Vila Bordó',
-    nombreInstitucion: COLEGIOS[0]
+    nombreProfesor: '',
+    nombreInstitucion: ''
   });
-
-  const cleanValue = (val: any) => {
-    if (val === undefined || val === null) return '';
-    const str = String(val).trim();
-    return str.replace(/^["']+|["']+$/g, '').replace(/""/g, '"').trim();
-  };
-
-  const processData = (rawData: any[]) => {
-    if (rawData.length === 0) throw new Error('El archivo está vacío.');
-
-    const headers = Object.keys(rawData[0]);
-    const preguntaKey = headers.find(k => k.toLowerCase().trim() === 'pregunta') || headers[0];
-    const respuestaKey = headers.find(k => k.toLowerCase().trim() === 'respuesta') || headers[1];
-    const temaKey = headers.find(k => k.toLowerCase().trim() === 'tema') || headers[2];
-
-    const parsed: Question[] = rawData.map((row, idx) => ({
-      id: `q-${Date.now()}-${idx}`,
-      pregunta: cleanValue(row[preguntaKey]),
-      respuesta: cleanValue(row[respuestaKey]),
-      tema: temaKey ? cleanValue(row[temaKey]) : ''
-    })).filter(q => q.pregunta !== '');
-
-    setCsvData(parsed);
-    setSuccess(`¡Listo! Se cargaron ${parsed.length} preguntas.`);
-    setTimeout(() => setSuccess(null), 4000);
-  };
 
   const handleFileUpload = (event: React.ChangeEvent<HTMLInputElement>) => {
     const file = event.target.files?.[0];
     if (!file) return;
-
     setLoading(true);
     setError(null);
-
-    const isExcel = file.name.endsWith('.xlsx') || file.name.endsWith('.xls');
     const reader = new FileReader();
-    
     reader.onload = (e) => {
       try {
-        if (isExcel) {
-          const data = new Uint8Array(e.target?.result as ArrayBuffer);
-          const workbook = XLSX.read(data, { type: 'array' });
-          const firstSheetName = workbook.SheetNames[0];
-          const worksheet = workbook.Sheets[firstSheetName];
-          const json = XLSX.utils.sheet_to_json(worksheet);
-          processData(json);
-        } else {
-          let text = e.target?.result as string;
-          text = text.replace(/^\uFEFF/, '');
-          const rows = text.split(/\r?\n/).filter(row => row.trim() !== '');
-          const firstRow = rows[0];
-          const separator = firstRow.includes(';') ? ';' : ',';
-          const csvHeaders = firstRow.split(separator).map(h => h.trim().toLowerCase());
-          
-          const csvJson = rows.slice(1).map(row => {
-            const values = row.split(separator);
-            const obj: any = {};
-            csvHeaders.forEach((h, i) => obj[h] = values[i]);
-            return obj;
-          });
-          processData(csvJson);
-        }
+        const text = e.target?.result as string;
+        const parsed = parseCSV(text);
+        setCsvData(parsed);
+        const mcCount = parsed.filter(q => q.tipo === 'mc').length;
+        const abCount = parsed.filter(q => !q.tipo || q.tipo === 'abierta').length;
+        const parts = [];
+        if (mcCount > 0) parts.push(`${mcCount} de múltiple opción`);
+        if (abCount > 0) parts.push(`${abCount} abiertas`);
+        setSuccess(`Se cargaron ${parsed.length} preguntas: ${parts.join(', ')}.`);
+        setTimeout(() => setSuccess(null), 4000);
       } catch (err: any) {
-        setError(err.message || 'Error al procesar el archivo.');
+        setError(err.message || 'Error al procesar el archivo CSV.');
       } finally {
         setLoading(false);
-        if (event.target) event.target.value = '';
       }
     };
-
-    if (isExcel) {
-      reader.readAsArrayBuffer(file);
-    } else {
-      reader.readAsText(file);
-    }
+    reader.readAsText(file);
   };
 
   const filteredQuestions = useMemo(() => {
-    if (!searchTerm) return csvData;
-    const term = searchTerm.toLowerCase();
-    return csvData.filter(q => 
-      q.pregunta.toLowerCase().includes(term) ||
-      (q.tema && q.tema.toLowerCase().includes(term))
+    if (!config.tema) return csvData;
+    return csvData.filter(q =>
+      q.tema?.toLowerCase().includes(config.tema.toLowerCase()) ||
+      q.pregunta.toLowerCase().includes(config.tema.toLowerCase())
     );
-  }, [csvData, searchTerm]);
-
-  const toggleSelection = (id: string | number) => {
-    const newSelected = new Set(selectedIds);
-    if (newSelected.has(id)) newSelected.delete(id);
-    else newSelected.add(id);
-    setSelectedIds(newSelected);
-  };
-
-  const handleAction = async (id: string | number, action: 'fix' | 'paraphrase') => {
-    const qIndex = csvData.findIndex(q => q.id === id);
-    if (qIndex === -1) return;
-    
-    setProcessingId(id);
-    try {
-      const originalText = csvData[qIndex].pregunta;
-      const newText = action === 'fix' 
-        ? await reviewAndFix(originalText) 
-        : await createAlternativeVersion(originalText);
-      
-      const newData = [...csvData];
-      newData[qIndex] = { ...newData[qIndex], pregunta: newText };
-      setCsvData(newData);
-      setSuccess(action === 'fix' ? "Ortografía corregida" : "Versión B generada");
-    } catch (e) {
-      setError("Error al conectar con la IA.");
-    } finally {
-      setProcessingId(null);
-      setTimeout(() => setSuccess(null), 2000);
-    }
-  };
-
-  const saveQuestionEdit = (id: string | number, newPregunta: string, newRespuesta: string) => {
-    setCsvData(prev => prev.map(q => q.id === id ? { ...q, pregunta: newPregunta, respuesta: newRespuesta } : q));
-    setEditingId(null);
-    setSuccess("Pregunta actualizada.");
-    setTimeout(() => setSuccess(null), 2000);
-  };
+  }, [csvData, config.tema]);
 
   const handleGeneratePdf = () => {
-    if (csvData.length === 0) return setError("Primero sube tu archivo.");
-    
-    let selected: Question[] = [];
-    if (selectionMode === 'manual') {
-      selected = csvData.filter(q => selectedIds.has(q.id));
-      if (selected.length === 0) return setError("Selecciona al menos una pregunta para el modo manual.");
-    } else {
-      const pool = filteredQuestions.length > 0 ? filteredQuestions : csvData;
-      const count = Math.min(config.cantidadPreguntas, pool.length);
-      selected = [...pool].sort(() => 0.5 - Math.random()).slice(0, count);
+    if (csvData.length === 0) { setError("Carga un banco de preguntas primero."); return; }
+    if (filteredQuestions.length < config.cantidadPreguntas) {
+      setError(`Solo hay ${filteredQuestions.length} preguntas disponibles para este filtro.`);
+      return;
     }
+    const shuffled = [...filteredQuestions].sort(() => 0.5 - Math.random());
+    const selected = shuffled.slice(0, config.cantidadPreguntas);
+    const exam: GeneratedExam = { config, questions: selected, date: new Date().toLocaleDateString('es-ES') };
+    generateExamPdf(exam);
+    setSuccess("PDF generado con éxito.");
+    setTimeout(() => setSuccess(null), 3000);
+  };
 
-    generateExamPdf({
-      config,
-      questions: selected,
-      date: new Date().toLocaleDateString('es-ES')
-    });
-    setSuccess("Examen PDF generado correctamente.");
+  const handleImproveText = async (id: string | number) => {
+    const qIndex = csvData.findIndex(q => q.id === id);
+    if (qIndex === -1) return;
+    setIsImproving(id.toString());
+    const improved = await improveQuestion(csvData[qIndex].pregunta);
+    const newData = [...csvData];
+    newData[qIndex] = { ...newData[qIndex], pregunta: improved };
+    setCsvData(newData);
+    setIsImproving(null);
+  };
+
+  const removeQuestion = (id: string | number) => {
+    setCsvData(prev => prev.filter(q => q.id !== id));
   };
 
   return (
-    <div className="min-h-screen bg-slate-50 flex flex-col font-sans">
-      <header className="bg-white border-b border-slate-200 py-3 px-8 sticky top-0 z-10 shadow-sm">
-        <div className="max-w-7xl mx-auto flex justify-between items-center">
+    <div className="min-h-screen pb-20">
+      {/* Header */}
+      <header className="bg-indigo-700 text-white py-8 px-6 shadow-lg mb-8">
+        <div className="max-w-6xl mx-auto flex flex-col md:flex-row justify-between items-center gap-4">
           <div className="flex items-center gap-3">
-            <div className="bg-indigo-600 p-1.5 rounded-lg text-white">
-              <ClipboardList className="w-5 h-5" />
+            <div className="bg-white/20 p-3 rounded-2xl">
+              <BookOpen className="w-8 h-8" />
             </div>
-            <h1 className="text-lg font-bold text-slate-800 tracking-tight">EduGen <span className="text-indigo-600">Pro</span></h1>
+            <div>
+              <h1 className="text-3xl font-bold tracking-tight">EduGen</h1>
+              <p className="text-indigo-100 opacity-80">Generador de Evaluaciones Académicas</p>
+            </div>
           </div>
-          
-          <div className="flex gap-4">
-            <label className="flex items-center gap-2 bg-slate-800 text-white hover:bg-slate-700 px-5 py-2 rounded-full cursor-pointer transition-all shadow-md text-xs font-semibold active:scale-95 group">
-              {loading ? <RefreshCw className="w-3 h-3 animate-spin" /> : <FileSpreadsheet className="w-3 h-3 group-hover:scale-110 transition-transform" />}
-              <span>{loading ? 'Procesando...' : 'Cargar Banco (Excel/CSV)'}</span>
-              <input type="file" accept=".csv, .xlsx, .xls" onChange={handleFileUpload} className="hidden" disabled={loading} />
+          <div className="flex items-center gap-4">
+            <label className="flex items-center gap-2 bg-indigo-600 hover:bg-indigo-500 transition-colors px-6 py-3 rounded-xl cursor-pointer font-medium shadow-sm border border-indigo-400/30">
+              <FileUp className="w-5 h-5" />
+              <span>Cargar CSV de Preguntas</span>
+              <input type="file" accept=".csv" onChange={handleFileUpload} className="hidden" />
             </label>
           </div>
         </div>
       </header>
 
-      <main className="flex-grow max-w-7xl mx-auto w-full p-6 grid grid-cols-1 lg:grid-cols-12 gap-6">
-        
-        <aside className="lg:col-span-4 space-y-4">
-          <div className="bg-white p-5 rounded-xl shadow-sm border border-slate-200">
-            <h2 className="text-[10px] font-bold text-slate-400 uppercase tracking-widest mb-4 flex items-center gap-2">
-              <Settings className="w-3 h-3" /> Configuración General
-            </h2>
-            
+      <main className="max-w-6xl mx-auto px-6 grid grid-cols-1 lg:grid-cols-12 gap-8">
+        {/* Alerts */}
+        <div className="lg:col-span-12">
+          {error && (
+            <div className="bg-red-50 border-l-4 border-red-500 p-4 rounded-r-lg flex items-center gap-3">
+              <AlertCircle className="text-red-500 w-5 h-5 flex-shrink-0" />
+              <span className="text-red-700 font-medium">{error}</span>
+              <button onClick={() => setError(null)} className="ml-auto text-red-400 hover:text-red-600">×</button>
+            </div>
+          )}
+          {success && (
+            <div className="bg-emerald-50 border-l-4 border-emerald-500 p-4 rounded-r-lg flex items-center gap-3">
+              <CheckCircle2 className="text-emerald-500 w-5 h-5 flex-shrink-0" />
+              <span className="text-emerald-700 font-medium">{success}</span>
+              <button onClick={() => setSuccess(null)} className="ml-auto text-emerald-400 hover:text-emerald-600">×</button>
+            </div>
+          )}
+        </div>
+
+        {/* Configuration */}
+        <section className="lg:col-span-4 space-y-6">
+          <div className="bg-white rounded-2xl p-6 shadow-sm border border-slate-200">
+            <div className="flex items-center gap-2 mb-6 border-b pb-4 border-slate-100">
+              <Settings className="w-5 h-5 text-indigo-600" />
+              <h2 className="text-xl font-bold text-slate-800">Configuración</h2>
+            </div>
             <div className="space-y-4">
-              <div className="space-y-1">
-                <label className="text-[10px] font-bold text-slate-500 ml-1">Institución / Colegio</label>
-                <select 
-                  value={config.nombreInstitucion}
+              <div>
+                <label className="block text-sm font-semibold text-slate-600 mb-1">Institución Educativa</label>
+                <input type="text" value={config.nombreInstitucion}
                   onChange={(e) => setConfig({...config, nombreInstitucion: e.target.value})}
-                  className="w-full px-3 py-2 rounded-lg bg-slate-50 border border-slate-200 focus:ring-2 focus:ring-indigo-500 outline-none text-xs"
-                >
-                  {COLEGIOS.map(col => <option key={col} value={col}>{col}</option>)}
-                </select>
+                  placeholder="Ej: Colegio San José"
+                  className="w-full px-4 py-2 rounded-lg border border-slate-200 focus:ring-2 focus:ring-indigo-500 outline-none transition-all" />
               </div>
-
-              <div className="space-y-1">
-                <label className="text-[10px] font-bold text-slate-500 ml-1">Docente Responsable</label>
-                <input 
-                  type="text" 
-                  value={config.nombreProfesor}
+              <div>
+                <label className="block text-sm font-semibold text-slate-600 mb-1">Docente</label>
+                <input type="text" value={config.nombreProfesor}
                   onChange={(e) => setConfig({...config, nombreProfesor: e.target.value})}
-                  className="w-full px-3 py-2 rounded-lg bg-slate-50 border border-slate-200 focus:ring-2 focus:ring-indigo-500 outline-none text-xs transition-all"
-                  placeholder="Nombre de la profesora"
-                />
+                  placeholder="Nombre y Apellido"
+                  className="w-full px-4 py-2 rounded-lg border border-slate-200 focus:ring-2 focus:ring-indigo-500 outline-none transition-all" />
               </div>
-
-              <div className="grid grid-cols-2 gap-3">
-                <div className="space-y-1">
-                  <label className="text-[10px] font-bold text-slate-500 ml-1">Asignatura</label>
-                  <select 
-                    value={config.asignatura}
+              <div className="grid grid-cols-1 gap-4">
+                <div>
+                  <label className="block text-sm font-semibold text-slate-600 mb-1">Asignatura</label>
+                  <select value={config.asignatura}
                     onChange={(e) => setConfig({...config, asignatura: e.target.value})}
-                    className="w-full px-3 py-2 rounded-lg bg-slate-50 border border-slate-200 focus:ring-2 focus:ring-indigo-500 outline-none text-xs"
-                  >
+                    className="w-full px-4 py-2 rounded-lg border border-slate-200 focus:ring-2 focus:ring-indigo-500 outline-none transition-all">
                     {ASIGNATURAS.map(a => <option key={a} value={a}>{a}</option>)}
                   </select>
                 </div>
-                <div className="space-y-1">
-                  <label className="text-[10px] font-bold text-slate-500 ml-1">Curso</label>
-                  <select 
-                    value={config.curso}
+                <div>
+                  <label className="block text-sm font-semibold text-slate-600 mb-1">Curso</label>
+                  <select value={config.curso}
                     onChange={(e) => setConfig({...config, curso: e.target.value})}
-                    className="w-full px-3 py-2 rounded-lg bg-slate-50 border border-slate-200 focus:ring-2 focus:ring-indigo-500 outline-none text-xs"
-                  >
+                    className="w-full px-4 py-2 rounded-lg border border-slate-200 focus:ring-2 focus:ring-indigo-500 outline-none transition-all">
                     {CURSOS.map(c => <option key={c} value={c}>{c}</option>)}
                   </select>
                 </div>
               </div>
-
-              <div className="pt-4 border-t border-slate-100">
-                <label className="text-[10px] font-bold text-slate-500 mb-2 block uppercase">Modo de Selección</label>
-                <div className="grid grid-cols-2 gap-2 mb-4">
-                  <button 
-                    onClick={() => setSelectionMode('random')}
-                    className={`py-2 px-3 rounded-lg text-[10px] font-bold border transition-all ${selectionMode === 'random' ? 'bg-indigo-600 text-white border-indigo-600 shadow-sm' : 'bg-white text-slate-600 border-slate-200'}`}
-                  >
-                    Aleatorio
-                  </button>
-                  <button 
-                    onClick={() => setSelectionMode('manual')}
-                    className={`py-2 px-3 rounded-lg text-[10px] font-bold border transition-all ${selectionMode === 'manual' ? 'bg-indigo-600 text-white border-indigo-600 shadow-sm' : 'bg-white text-slate-600 border-slate-200'}`}
-                  >
-                    Manual ({selectedIds.size})
-                  </button>
-                </div>
-
-                {selectionMode === 'random' && (
-                  <div className="space-y-2">
-                    <div className="flex justify-between items-center">
-                      <label className="text-[10px] font-bold text-slate-500 uppercase">Cantidad de preguntas</label>
-                      <span className="text-indigo-600 font-bold bg-indigo-50 px-2 py-0.5 rounded text-[10px]">{config.cantidadPreguntas}</span>
-                    </div>
-                    <input 
-                      type="range" 
-                      min="1" 
-                      max={csvData.length || 10} 
-                      value={config.cantidadPreguntas}
-                      onChange={(e) => setConfig({...config, cantidadPreguntas: parseInt(e.target.value)})}
-                      className="w-full h-1.5 bg-slate-200 rounded-lg appearance-none cursor-pointer accent-indigo-600"
-                    />
-                  </div>
-                )}
+              <div>
+                <label className="block text-sm font-semibold text-slate-600 mb-1">Filtrar por Tema/Palabra Clave (opcional)</label>
+                <input type="text" value={config.tema}
+                  onChange={(e) => setConfig({...config, tema: e.target.value})}
+                  placeholder="Ej: Álgebra"
+                  className="w-full px-4 py-2 rounded-lg border border-slate-200 focus:ring-2 focus:ring-indigo-500 outline-none transition-all" />
               </div>
-
-              <button 
-                onClick={handleGeneratePdf}
-                disabled={csvData.length === 0}
-                className={`w-full py-3 rounded-lg font-bold flex items-center justify-center gap-2 shadow-md transition-all transform active:scale-95 text-sm ${
+              <div>
+                <label className="block text-sm font-semibold text-slate-600 mb-1">Cantidad de Preguntas</label>
+                <div className="flex items-center gap-4">
+                  <input type="range" min="1"
+                    max={Math.min(filteredQuestions.length || 20, 50)}
+                    value={config.cantidadPreguntas}
+                    onChange={(e) => setConfig({...config, cantidadPreguntas: parseInt(e.target.value)})}
+                    className="flex-grow accent-indigo-600" />
+                  <span className="font-bold text-indigo-600 bg-indigo-50 px-3 py-1 rounded-full border border-indigo-100 min-w-[3rem] text-center">
+                    {config.cantidadPreguntas}
+                  </span>
+                </div>
+              </div>
+              <button onClick={handleGeneratePdf} disabled={csvData.length === 0}
+                className={`w-full flex items-center justify-center gap-2 py-4 rounded-xl font-bold shadow-lg transition-all transform active:scale-95 ${
                   csvData.length > 0 
-                  ? 'bg-indigo-600 text-white hover:bg-indigo-700 shadow-indigo-100' 
+                  ? 'bg-indigo-600 text-white hover:bg-indigo-700' 
                   : 'bg-slate-200 text-slate-400 cursor-not-allowed'
-                }`}
-              >
-                <Download className="w-4 h-4" />
-                Descargar Evaluación
+                }`}>
+                <Download className="w-5 h-5" />
+                Descargar Evaluación PDF
               </button>
             </div>
           </div>
 
-          <div className="bg-gradient-to-br from-indigo-600 to-violet-700 text-white p-5 rounded-xl shadow-lg relative overflow-hidden">
-            <Sparkles className="absolute -right-2 -top-2 w-16 h-16 text-white/10" />
-            <h3 className="text-xs font-bold mb-1 flex items-center gap-2">Tips Docente</h3>
-            <p className="text-[10px] text-indigo-100 leading-tight">
-              Diseño ultra-compacto (Calibri 10) para maximizar ahorro de papel. Las respuestas se incluyen en una hoja separada al final.
+          <div className="bg-indigo-50 rounded-2xl p-6 border border-indigo-100">
+            <h3 className="text-indigo-900 font-bold flex items-center gap-2 mb-2">
+              <BrainCircuit className="w-5 h-5" />
+              Formatos de CSV aceptados
+            </h3>
+            <p className="text-indigo-700 text-sm leading-relaxed mb-2">
+              <strong>Múltiple opción:</strong> columnas <code className="bg-indigo-200/50 px-1 rounded text-indigo-900">Question</code>, <code className="bg-indigo-200/50 px-1 rounded text-indigo-900">Option A</code>, <code className="bg-indigo-200/50 px-1 rounded text-indigo-900">Option B</code>, <code className="bg-indigo-200/50 px-1 rounded text-indigo-900">Option C</code>, <code className="bg-indigo-200/50 px-1 rounded text-indigo-900">Option D</code>, <code className="bg-indigo-200/50 px-1 rounded text-indigo-900">Correct Answer</code>
+            </p>
+            <p className="text-indigo-700 text-sm leading-relaxed">
+              <strong>Abierto/Simple:</strong> columnas <code className="bg-indigo-200/50 px-1 rounded text-indigo-900">pregunta</code>, <code className="bg-indigo-200/50 px-1 rounded text-indigo-900">respuesta</code> y opcionalmente <code className="bg-indigo-200/50 px-1 rounded text-indigo-900">tema</code>, <code className="bg-indigo-200/50 px-1 rounded text-indigo-900">tipo</code>
             </p>
           </div>
-        </aside>
+        </section>
 
-        <section className="lg:col-span-8 space-y-4 flex flex-col h-[78vh]">
-          {error && (
-            <div className="px-4 py-2 rounded-lg border bg-red-50 border-red-200 text-red-700 flex items-center gap-3 animate-in fade-in slide-in-from-top-2">
-              <AlertCircle className="w-4 h-4 flex-shrink-0" />
-              <span className="text-xs font-semibold">{error}</span>
-              <button onClick={() => setError(null)} className="ml-auto text-red-400">×</button>
-            </div>
-          )}
-          {success && (
-            <div className="px-4 py-2 rounded-lg border bg-emerald-50 border-emerald-200 text-emerald-700 flex items-center gap-3 animate-in fade-in slide-in-from-top-2">
-              <CheckCircle2 className="w-4 h-4 flex-shrink-0" />
-              <span className="text-xs font-semibold">{success}</span>
-              <button onClick={() => setSuccess(null)} className="ml-auto text-emerald-400">×</button>
-            </div>
-          )}
-
-          <div className="bg-white rounded-xl shadow-sm border border-slate-200 overflow-hidden flex flex-col flex-grow">
-            <div className="p-3 border-b border-slate-100 bg-slate-50/50 flex flex-col sm:flex-row gap-3 justify-between items-center">
-              <div className="relative w-full sm:w-64">
-                <Search className="absolute left-3 top-1/2 -translate-y-1/2 w-3.5 h-3.5 text-slate-400" />
-                <input 
-                  type="text" 
-                  placeholder="Buscar en el banco..."
-                  value={searchTerm}
-                  onChange={(e) => setSearchTerm(e.target.value)}
-                  className="w-full pl-9 pr-3 py-1.5 bg-white border border-slate-200 rounded-lg text-xs outline-none focus:ring-2 focus:ring-indigo-500 transition-all shadow-inner"
-                />
+        {/* Questions List */}
+        <section className="lg:col-span-8">
+          <div className="bg-white rounded-2xl shadow-sm border border-slate-200 overflow-hidden">
+            <div className="flex items-center justify-between p-6 border-b border-slate-100 bg-slate-50/50">
+              <div className="flex items-center gap-2">
+                <ClipboardList className="w-5 h-5 text-indigo-600" />
+                <h2 className="text-xl font-bold text-slate-800">
+                  Banco de Preguntas
+                  <span className="ml-2 text-sm font-normal text-slate-500">
+                    ({filteredQuestions.length} {filteredQuestions.length === 1 ? 'disponible' : 'disponibles'})
+                  </span>
+                </h2>
               </div>
-              <div className="flex items-center gap-2 text-[10px] font-bold text-slate-500 uppercase">
-                <BookOpen className="w-3.5 h-3.5" />
-                <span>{filteredQuestions.length} Items disponibles</span>
-              </div>
+              {csvData.length > 0 && (
+                <button onClick={() => setCsvData([])}
+                  className="text-red-500 hover:text-red-700 text-sm font-medium flex items-center gap-1 transition-colors">
+                  <Trash2 className="w-4 h-4" />
+                  Vaciar banco
+                </button>
+              )}
             </div>
 
-            <div className="flex-grow overflow-y-auto divide-y divide-slate-100">
+            <div className="divide-y divide-slate-100 max-h-[700px] overflow-y-auto">
               {csvData.length === 0 ? (
-                <div className="h-full flex flex-col items-center justify-center text-center p-12 opacity-30">
-                  <FileSpreadsheet className="w-16 h-16 mb-4" />
-                  <p className="text-lg font-bold">Sin datos</p>
-                  <p className="text-xs mt-1">Carga un Excel para ver tus preguntas aquí.</p>
+                <div className="p-20 flex flex-col items-center text-center opacity-50">
+                  <div className="bg-slate-100 p-6 rounded-full mb-4">
+                    <FileUp className="w-12 h-12 text-slate-400" />
+                  </div>
+                  <p className="text-slate-500 font-medium text-lg">Carga un archivo CSV para comenzar</p>
+                  <p className="text-slate-400 text-sm">Aparecerán aquí todas tus preguntas cargadas</p>
                 </div>
               ) : (
                 filteredQuestions.map((q, idx) => (
-                  <div key={q.id} className={`p-4 hover:bg-slate-50/80 transition-all group flex gap-4 ${selectedIds.has(q.id) && selectionMode === 'manual' ? 'bg-indigo-50/50' : ''}`}>
-                    {selectionMode === 'manual' && (
-                      <button 
-                        onClick={() => toggleSelection(q.id)}
-                        className="mt-1 flex-shrink-0"
-                      >
-                        {selectedIds.has(q.id) ? (
-                          <CheckSquare className="w-5 h-5 text-indigo-600" />
-                        ) : (
-                          <Square className="w-5 h-5 text-slate-300" />
-                        )}
-                      </button>
-                    )}
-                    
-                    <div className="flex-grow min-w-0">
-                      <div className="flex items-center gap-2 mb-1.5">
-                        <span className="text-[9px] font-black text-slate-300 uppercase tracking-tighter">PREGUNTA #{idx + 1}</span>
-                        {q.tema && <span className="bg-slate-100 text-slate-600 text-[8px] font-bold px-1.5 py-0.5 rounded border border-slate-200 uppercase">{q.tema}</span>}
-                      </div>
-                      
-                      {editingId === q.id ? (
-                        <div className="space-y-3 p-3 bg-white border border-indigo-200 rounded-lg shadow-sm">
-                          <div className="space-y-1">
-                            <label className="text-[8px] font-bold uppercase text-slate-400">Pregunta:</label>
-                            <textarea 
-                              id={`edit-p-${q.id}`}
-                              defaultValue={q.pregunta}
-                              className="w-full p-2 text-xs border border-slate-200 rounded-md focus:ring-1 focus:ring-indigo-500 outline-none min-h-[60px]"
-                            />
-                          </div>
-                          <div className="space-y-1">
-                            <label className="text-[8px] font-bold uppercase text-slate-400">Respuesta:</label>
-                            <textarea 
-                              id={`edit-r-${q.id}`}
-                              defaultValue={q.respuesta}
-                              className="w-full p-2 text-xs border border-slate-200 rounded-md focus:ring-1 focus:ring-indigo-500 outline-none min-h-[40px]"
-                            />
-                          </div>
-                          <div className="flex justify-end gap-2">
-                            <button 
-                              onClick={() => setEditingId(null)}
-                              className="px-2 py-1 text-[10px] text-slate-500 hover:bg-slate-100 rounded flex items-center gap-1"
-                            >
-                              <X className="w-3 h-3" /> Cancelar
-                            </button>
-                            <button 
-                              onClick={() => {
-                                const p = (document.getElementById(`edit-p-${q.id}`) as HTMLTextAreaElement).value;
-                                const r = (document.getElementById(`edit-r-${q.id}`) as HTMLTextAreaElement).value;
-                                saveQuestionEdit(q.id, p, r);
-                              }}
-                              className="px-2 py-1 text-[10px] bg-indigo-600 text-white hover:bg-indigo-700 rounded flex items-center gap-1 font-bold"
-                            >
-                              <Save className="w-3 h-3" /> Guardar Cambios
-                            </button>
-                          </div>
+                  <div key={q.id} className="p-6 hover:bg-slate-50 transition-colors group">
+                    <div className="flex justify-between items-start gap-4">
+                      <div className="flex-grow">
+                        {/* Badges row */}
+                        <div className="flex items-center gap-2 mb-2 flex-wrap">
+                          <span className="bg-slate-200 text-slate-600 text-xs font-bold px-2 py-1 rounded">#{idx + 1}</span>
+                          <TipoBadge tipo={q.tipo} />
+                          {q.tema && (
+                            <span className="bg-indigo-50 text-indigo-600 text-xs font-semibold px-2 py-1 rounded border border-indigo-100 uppercase tracking-wider">
+                              {q.tema}
+                            </span>
+                          )}
                         </div>
-                      ) : (
-                        <>
-                          <p className="text-slate-800 font-medium text-sm mb-2 leading-relaxed break-words">{q.pregunta}</p>
-                          <div className="bg-slate-50/80 p-2.5 rounded-lg border border-slate-200/50">
-                            <span className="text-[8px] font-bold text-slate-400 uppercase block mb-0.5">Clave Respuesta:</span>
-                            <p className="text-slate-600 text-xs italic line-clamp-2">{q.respuesta}</p>
+
+                        {/* Question */}
+                        <h4 className="text-slate-800 font-medium text-lg mb-3">{q.pregunta}</h4>
+
+                        {/* Options for MC */}
+                        {q.tipo === 'mc' && q.opciones && (
+                          <div className="grid grid-cols-1 sm:grid-cols-2 gap-1 mb-3">
+                            {(['a','b','c','d'] as const).map(letra => {
+                              if (!q.opciones![letra]) return null;
+                              const isCorrect = q.respuestaCorrecta?.toLowerCase() === letra;
+                              return (
+                                <div key={letra}
+                                  className={`flex items-start gap-2 px-3 py-2 rounded-lg text-sm border ${
+                                    isCorrect 
+                                    ? 'bg-emerald-50 border-emerald-200 text-emerald-800 font-semibold' 
+                                    : 'bg-slate-50 border-slate-200 text-slate-600'
+                                  }`}>
+                                  <span className="font-bold uppercase shrink-0">{letra})</span>
+                                  <span>{q.opciones![letra]}</span>
+                                  {isCorrect && <CheckCircle2 className="w-4 h-4 text-emerald-500 shrink-0 ml-auto" />}
+                                </div>
+                              );
+                            })}
                           </div>
-                        </>
-                      )}
-                    </div>
-                    
-                    <div className="flex flex-col gap-1.5 opacity-0 group-hover:opacity-100 transition-all flex-shrink-0">
-                      <button 
-                        onClick={() => setEditingId(q.id)}
-                        className="p-1.5 bg-white border border-slate-200 rounded-lg text-indigo-600 hover:bg-indigo-50 shadow-sm transition-colors"
-                        title="Editar manualmente"
-                      >
-                        <Edit3 className="w-3.5 h-3.5" />
-                      </button>
-                      <button 
-                        onClick={() => handleAction(q.id, 'fix')}
-                        disabled={!!processingId}
-                        className="p-1.5 bg-white border border-slate-200 rounded-lg text-emerald-600 hover:bg-emerald-50 shadow-sm"
-                        title="Corregir ortografía con IA"
-                      >
-                        {processingId === q.id ? <RefreshCw className="w-3.5 h-3.5 animate-spin" /> : <Sparkles className="w-3.5 h-3.5" />}
-                      </button>
-                      <button 
-                        onClick={() => setCsvData(prev => prev.filter(item => item.id !== q.id))}
-                        className="p-1.5 bg-white border border-slate-200 rounded-lg text-red-400 hover:bg-red-50 shadow-sm"
-                        title="Eliminar ítem"
-                      >
-                        <Trash2 className="w-3.5 h-3.5" />
-                      </button>
+                        )}
+
+                        {/* VF options */}
+                        {q.tipo === 'vf' && (
+                          <div className="flex gap-3 mb-3">
+                            <span className={`px-3 py-1 rounded-lg text-sm border font-semibold ${q.respuesta?.toLowerCase().includes('verdad') ? 'bg-emerald-50 border-emerald-200 text-emerald-700' : 'bg-slate-50 border-slate-200 text-slate-500'}`}>✓ Verdadero</span>
+                            <span className={`px-3 py-1 rounded-lg text-sm border font-semibold ${q.respuesta?.toLowerCase().includes('fals') ? 'bg-emerald-50 border-emerald-200 text-emerald-700' : 'bg-slate-50 border-slate-200 text-slate-500'}`}>✗ Falso</span>
+                          </div>
+                        )}
+
+                        {/* Answer / Justification */}
+                        {q.tipo !== 'mc' && (
+                          <div className="bg-slate-100 p-3 rounded-lg border-l-4 border-slate-300">
+                            <p className="text-slate-600 text-sm">
+                              <span className="font-bold text-slate-500 text-xs uppercase block mb-1">Respuesta:</span>
+                              {q.respuesta}
+                            </p>
+                          </div>
+                        )}
+                        {q.tipo === 'mc' && q.justificacion && (
+                          <div className="bg-amber-50 p-3 rounded-lg border-l-4 border-amber-300 mt-2">
+                            <p className="text-amber-800 text-sm">
+                              <span className="font-bold text-amber-600 text-xs uppercase block mb-1">Justificación:</span>
+                              {q.justificacion}
+                            </p>
+                          </div>
+                        )}
+                      </div>
+
+                      {/* Actions */}
+                      <div className="flex flex-col gap-2 opacity-0 group-hover:opacity-100 transition-opacity">
+                        <button
+                          onClick={() => handleImproveText(q.id)}
+                          disabled={!!isImproving}
+                          title="Mejorar redacción con IA"
+                          className={`p-2 rounded-lg text-indigo-600 hover:bg-indigo-100 transition-colors border border-transparent hover:border-indigo-200 ${isImproving === q.id.toString() ? 'animate-pulse' : ''}`}>
+                          <BrainCircuit className="w-5 h-5" />
+                        </button>
+                        <button
+                          onClick={() => removeQuestion(q.id)}
+                          className="p-2 text-slate-400 hover:text-red-500 hover:bg-red-50 rounded-lg transition-colors">
+                          <Trash2 className="w-5 h-5" />
+                        </button>
+                      </div>
                     </div>
                   </div>
                 ))
               )}
             </div>
+
+            {csvData.length > 0 && filteredQuestions.length === 0 && (
+              <div className="p-12 text-center">
+                <p className="text-slate-500">No hay preguntas que coincidan con el filtro de tema.</p>
+              </div>
+            )}
           </div>
         </section>
       </main>
-      
-      <footer className="bg-white border-t border-slate-200 py-2 px-8 flex justify-between items-center text-[9px] font-bold text-slate-400 uppercase tracking-widest">
-        <span>EduGen Pro — Gestión de Exámenes</span>
-        <span>Docente: Verónica Vila Bordó</span>
+
+      {/* Footer */}
+      <footer className="fixed bottom-0 left-0 right-0 bg-white/80 backdrop-blur-md border-t border-slate-200 p-4 text-center">
+        <p className="text-slate-500 text-sm font-medium">
+          EduGen Pro — Herramienta de Soporte Docente
+        </p>
       </footer>
     </div>
   );
