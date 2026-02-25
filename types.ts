@@ -5,6 +5,15 @@ export interface Question {
   respuesta: string;
   tema?: string;
   dificultad?: string;
+  tipo?: 'abierta' | 'mc' | 'vf';
+  opciones?: {
+    a: string;
+    b: string;
+    c?: string;
+    d?: string;
+  };
+  respuestaCorrecta?: string; // "A", "B", "C" o "D"
+  justificacion?: string;
 }
 
 export interface ExamConfig {
