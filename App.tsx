@@ -19,7 +19,7 @@ import {
   SpellCheck,
   RefreshCw
 } from 'lucide-react';
-import { ASIGNATURAS, CURSOS } from './constants';
+import { ASIGNATURAS, CURSOS, INSTITUCIONES, DOCENTES } from './constants';
 import { Question, ExamConfig, GeneratedExam } from './types';
 import { generateExamPdf } from './services/pdfService';
 import { reviewAndFix, createAlternativeVersion } from './services/geminiService';
@@ -141,8 +141,8 @@ const App: React.FC = () => {
     curso: CURSOS[0],
     tema: '',
     cantidadPreguntas: 5,
-    nombreProfesor: '',
-    nombreInstitucion: ''
+    nombreProfesor: DOCENTES[0],
+    nombreInstitucion: INSTITUCIONES[0]
   });
 
   const handleFileUpload = (event: React.ChangeEvent<HTMLInputElement>) => {
@@ -316,17 +316,19 @@ const App: React.FC = () => {
             <div className="space-y-4">
               <div>
                 <label className="block text-sm font-semibold text-slate-600 mb-1">Institución Educativa</label>
-                <input type="text" value={config.nombreInstitucion}
+                <select value={config.nombreInstitucion}
                   onChange={(e) => setConfig({...config, nombreInstitucion: e.target.value})}
-                  placeholder="Ej: Colegio San José"
-                  className="w-full px-4 py-2 rounded-lg border border-slate-200 focus:ring-2 focus:ring-indigo-500 outline-none transition-all" />
+                  className="w-full px-4 py-2 rounded-lg border border-slate-200 focus:ring-2 focus:ring-indigo-500 outline-none transition-all">
+                  {INSTITUCIONES.map(i => <option key={i} value={i}>{i}</option>)}
+                </select>
               </div>
               <div>
                 <label className="block text-sm font-semibold text-slate-600 mb-1">Docente</label>
-                <input type="text" value={config.nombreProfesor}
+                <select value={config.nombreProfesor}
                   onChange={(e) => setConfig({...config, nombreProfesor: e.target.value})}
-                  placeholder="Nombre y Apellido"
-                  className="w-full px-4 py-2 rounded-lg border border-slate-200 focus:ring-2 focus:ring-indigo-500 outline-none transition-all" />
+                  className="w-full px-4 py-2 rounded-lg border border-slate-200 focus:ring-2 focus:ring-indigo-500 outline-none transition-all">
+                  {DOCENTES.map(d => <option key={d} value={d}>{d}</option>)}
+                </select>
               </div>
               <div className="grid grid-cols-1 gap-4">
                 <div>
