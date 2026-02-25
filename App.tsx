@@ -15,12 +15,14 @@ import {
   Save,
   X,
   Shuffle,
-  MousePointerClick
+  MousePointerClick,
+  SpellCheck,
+  RefreshCw
 } from 'lucide-react';
 import { ASIGNATURAS, CURSOS } from './constants';
 import { Question, ExamConfig, GeneratedExam } from './types';
 import { generateExamPdf } from './services/pdfService';
-import { improveQuestion } from './services/geminiService';
+import { reviewAndFix, createAlternativeVersion } from './services/geminiService';
 
 // ─── CSV Parser ───────────────────────────────────────────────────────────────
 function parseCSV(text: string): Question[] {
@@ -122,7 +124,8 @@ const App: React.FC = () => {
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [success, setSuccess] = useState<string | null>(null);
-  const [isImproving, setIsImproving] = useState<string | null>(null);
+  // null | "fix:{id}" | "alt:{id}"
+  const [aiAction, setAiAction] = useState<string | null>(null);
 
   // Modo de selección: 'aleatorio' | 'manual'
   const [modoSeleccion, setModoSeleccion] = useState<'aleatorio' | 'manual'>('aleatorio');
@@ -221,15 +224,26 @@ const App: React.FC = () => {
     setTimeout(() => setSuccess(null), 3000);
   };
 
-  const handleImproveText = async (id: string | number) => {
+  const handleFixText = async (id: string | number) => {
     const qIndex = csvData.findIndex(q => q.id === id);
     if (qIndex === -1) return;
-    setIsImproving(id.toString());
-    const improved = await improveQuestion(csvData[qIndex].pregunta);
+    setAiAction(`fix:${id}`);
+    const fixed = await reviewAndFix(csvData[qIndex].pregunta);
     const newData = [...csvData];
-    newData[qIndex] = { ...newData[qIndex], pregunta: improved };
+    newData[qIndex] = { ...newData[qIndex], pregunta: fixed };
     setCsvData(newData);
-    setIsImproving(null);
+    setAiAction(null);
+  };
+
+  const handleAlternativeText = async (id: string | number) => {
+    const qIndex = csvData.findIndex(q => q.id === id);
+    if (qIndex === -1) return;
+    setAiAction(`alt:${id}`);
+    const alt = await createAlternativeVersion(csvData[qIndex].pregunta);
+    const newData = [...csvData];
+    newData[qIndex] = { ...newData[qIndex], pregunta: alt };
+    setCsvData(newData);
+    setAiAction(null);
   };
 
   const removeQuestion = (id: string | number) => {
@@ -601,11 +615,18 @@ const App: React.FC = () => {
                               <Pencil className="w-5 h-5" />
                             </button>
                             <button
-                              onClick={() => handleImproveText(q.id)}
-                              disabled={!!isImproving}
-                              title="Mejorar redacción con IA"
-                              className={`p-2 rounded-lg text-indigo-600 hover:bg-indigo-100 transition-colors border border-transparent hover:border-indigo-200 ${isImproving === q.id.toString() ? 'animate-pulse' : ''}`}>
-                              <BrainCircuit className="w-5 h-5" />
+                              onClick={() => handleFixText(q.id)}
+                              disabled={!!aiAction}
+                              title="Corregir ortografía y gramática"
+                              className={`p-2 rounded-lg text-emerald-600 hover:bg-emerald-50 transition-colors border border-transparent hover:border-emerald-200 ${aiAction === `fix:${q.id}` ? 'animate-pulse' : ''}`}>
+                              <SpellCheck className="w-5 h-5" />
+                            </button>
+                            <button
+                              onClick={() => handleAlternativeText(q.id)}
+                              disabled={!!aiAction}
+                              title="Generar versión alternativa"
+                              className={`p-2 rounded-lg text-indigo-600 hover:bg-indigo-100 transition-colors border border-transparent hover:border-indigo-200 ${aiAction === `alt:${q.id}` ? 'animate-pulse' : ''}`}>
+                              <RefreshCw className="w-5 h-5" />
                             </button>
                             <button
                               onClick={() => removeQuestion(q.id)}
