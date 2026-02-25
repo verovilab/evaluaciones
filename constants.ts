@@ -1,4 +1,3 @@
-
 export const ASIGNATURAS = [
   "Fundamentos de Gestión",
   "Organización y Gestión",
@@ -22,7 +21,11 @@ export const CURSOS = [
   "6A"
 ];
 
-export const COLEGIOS = [
-  "EETP N°602",
-  "EESO N°206"
+export const INSTITUCIONES = [
+  'EETP N°602 "Gral. José de San Martín"',
+  'EESO N°206 "Rosa Turner de Estrugamou"',
+];
+
+export const DOCENTES = [
+  "Verónica Vila Bordó",
 ];
