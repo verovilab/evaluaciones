@@ -1,4 +1,4 @@
-import React, { useState, useCallback, useMemo } from 'react';
+import React, { useState, useMemo } from 'react';
 import { 
   FileUp, 
   Download, 
@@ -10,7 +10,12 @@ import {
   Trash2,
   BrainCircuit,
   CheckSquare,
-  List
+  List,
+  Pencil,
+  Save,
+  X,
+  Shuffle,
+  MousePointerClick
 } from 'lucide-react';
 import { ASIGNATURAS, CURSOS } from './constants';
 import { Question, ExamConfig, GeneratedExam } from './types';
@@ -22,7 +27,6 @@ function parseCSV(text: string): Question[] {
   const lines = text.split('\n').filter(l => l.trim() !== '');
   if (lines.length < 2) throw new Error('El CSV está vacío o no tiene datos.');
 
-  // Parse header respecting quoted fields
   const parseRow = (row: string): string[] => {
     const result: string[] = [];
     let current = '';
@@ -44,8 +48,6 @@ function parseCSV(text: string): Question[] {
   };
 
   const rawHeaders = parseRow(lines[0]).map(h => h.toLowerCase().replace(/^"|"$/g, ''));
-
-  // Detect CSV format
   const isMultipleChoice = rawHeaders.includes('option a') || rawHeaders.includes('opcion_a') || rawHeaders.includes('opción a');
   const isSimple = rawHeaders.includes('pregunta') && rawHeaders.includes('respuesta');
 
@@ -62,9 +64,7 @@ function parseCSV(text: string): Question[] {
 
     if (isMultipleChoice) {
       const correctRaw = get('correct answer') || get('respuesta_correcta') || '';
-      // Extract just the letter (A, B, C, D)
       const correctLetter = correctRaw.replace(/^([ABCD])[\.\)].*/i, '$1').trim().toUpperCase();
-
       return {
         id: idx,
         pregunta: get('question') || get('pregunta'),
@@ -124,6 +124,15 @@ const App: React.FC = () => {
   const [success, setSuccess] = useState<string | null>(null);
   const [isImproving, setIsImproving] = useState<string | null>(null);
 
+  // Modo de selección: 'aleatorio' | 'manual'
+  const [modoSeleccion, setModoSeleccion] = useState<'aleatorio' | 'manual'>('aleatorio');
+  // IDs de preguntas seleccionadas manualmente
+  const [seleccionadas, setSeleccionadas] = useState<Set<string | number>>(new Set());
+
+  // Edición inline
+  const [editandoId, setEditandoId] = useState<string | number | null>(null);
+  const [editForm, setEditForm] = useState<{ pregunta: string; respuesta: string; tema: string }>({ pregunta: '', respuesta: '', tema: '' });
+
   const [config, setConfig] = useState<ExamConfig>({
     asignatura: ASIGNATURAS[0],
     curso: CURSOS[0],
@@ -144,6 +153,7 @@ const App: React.FC = () => {
         const text = e.target?.result as string;
         const parsed = parseCSV(text);
         setCsvData(parsed);
+        setSeleccionadas(new Set());
         const mcCount = parsed.filter(q => q.tipo === 'mc').length;
         const abCount = parsed.filter(q => !q.tipo || q.tipo === 'abierta').length;
         const parts = [];
@@ -168,14 +178,43 @@ const App: React.FC = () => {
     );
   }, [csvData, config.tema]);
 
+  const toggleSeleccion = (id: string | number) => {
+    setSeleccionadas(prev => {
+      const next = new Set(prev);
+      if (next.has(id)) next.delete(id);
+      else next.add(id);
+      return next;
+    });
+  };
+
+  const toggleTodas = () => {
+    if (seleccionadas.size === filteredQuestions.length) {
+      setSeleccionadas(new Set());
+    } else {
+      setSeleccionadas(new Set(filteredQuestions.map(q => q.id)));
+    }
+  };
+
   const handleGeneratePdf = () => {
     if (csvData.length === 0) { setError("Carga un banco de preguntas primero."); return; }
-    if (filteredQuestions.length < config.cantidadPreguntas) {
-      setError(`Solo hay ${filteredQuestions.length} preguntas disponibles para este filtro.`);
-      return;
+
+    let selected: Question[] = [];
+
+    if (modoSeleccion === 'manual') {
+      selected = csvData.filter(q => seleccionadas.has(q.id));
+      if (selected.length === 0) {
+        setError("Seleccioná al menos una pregunta en modo Manual.");
+        return;
+      }
+    } else {
+      if (filteredQuestions.length < config.cantidadPreguntas) {
+        setError(`Solo hay ${filteredQuestions.length} preguntas disponibles para este filtro.`);
+        return;
+      }
+      const shuffled = [...filteredQuestions].sort(() => 0.5 - Math.random());
+      selected = shuffled.slice(0, config.cantidadPreguntas);
     }
-    const shuffled = [...filteredQuestions].sort(() => 0.5 - Math.random());
-    const selected = shuffled.slice(0, config.cantidadPreguntas);
+
     const exam: GeneratedExam = { config, questions: selected, date: new Date().toLocaleDateString('es-ES') };
     generateExamPdf(exam);
     setSuccess("PDF generado con éxito.");
@@ -195,7 +234,20 @@ const App: React.FC = () => {
 
   const removeQuestion = (id: string | number) => {
     setCsvData(prev => prev.filter(q => q.id !== id));
+    setSeleccionadas(prev => { const next = new Set(prev); next.delete(id); return next; });
   };
+
+  const startEdit = (q: Question) => {
+    setEditandoId(q.id);
+    setEditForm({ pregunta: q.pregunta, respuesta: q.respuesta, tema: q.tema || '' });
+  };
+
+  const saveEdit = (id: string | number) => {
+    setCsvData(prev => prev.map(q => q.id === id ? { ...q, ...editForm } : q));
+    setEditandoId(null);
+  };
+
+  const cancelEdit = () => setEditandoId(null);
 
   return (
     <div className="min-h-screen pb-20">
@@ -287,19 +339,54 @@ const App: React.FC = () => {
                   placeholder="Ej: Álgebra"
                   className="w-full px-4 py-2 rounded-lg border border-slate-200 focus:ring-2 focus:ring-indigo-500 outline-none transition-all" />
               </div>
+
+              {/* ── Modo de Selección ── */}
               <div>
-                <label className="block text-sm font-semibold text-slate-600 mb-1">Cantidad de Preguntas</label>
-                <div className="flex items-center gap-4">
-                  <input type="range" min="1"
-                    max={Math.min(filteredQuestions.length || 20, 50)}
-                    value={config.cantidadPreguntas}
-                    onChange={(e) => setConfig({...config, cantidadPreguntas: parseInt(e.target.value)})}
-                    className="flex-grow accent-indigo-600" />
-                  <span className="font-bold text-indigo-600 bg-indigo-50 px-3 py-1 rounded-full border border-indigo-100 min-w-[3rem] text-center">
-                    {config.cantidadPreguntas}
-                  </span>
+                <label className="block text-sm font-semibold text-slate-600 mb-2">Modo de Selección</label>
+                <div className="flex rounded-xl overflow-hidden border border-slate-200">
+                  <button
+                    onClick={() => setModoSeleccion('aleatorio')}
+                    className={`flex-1 flex items-center justify-center gap-2 py-2.5 text-sm font-semibold transition-all ${
+                      modoSeleccion === 'aleatorio'
+                        ? 'bg-indigo-600 text-white'
+                        : 'bg-white text-slate-500 hover:bg-slate-50'
+                    }`}>
+                    <Shuffle className="w-4 h-4" /> Aleatorio
+                  </button>
+                  <button
+                    onClick={() => setModoSeleccion('manual')}
+                    className={`flex-1 flex items-center justify-center gap-2 py-2.5 text-sm font-semibold transition-all ${
+                      modoSeleccion === 'manual'
+                        ? 'bg-indigo-600 text-white'
+                        : 'bg-white text-slate-500 hover:bg-slate-50'
+                    }`}>
+                    <MousePointerClick className="w-4 h-4" /> Manual ({seleccionadas.size})
+                  </button>
                 </div>
+                {modoSeleccion === 'manual' && (
+                  <p className="text-xs text-indigo-600 mt-1.5 font-medium">
+                    ✓ Hacé click en las preguntas del banco para seleccionarlas
+                  </p>
+                )}
               </div>
+
+              {/* Cantidad — solo en modo aleatorio */}
+              {modoSeleccion === 'aleatorio' && (
+                <div>
+                  <label className="block text-sm font-semibold text-slate-600 mb-1">Cantidad de Preguntas</label>
+                  <div className="flex items-center gap-4">
+                    <input type="range" min="1"
+                      max={Math.min(filteredQuestions.length || 20, 50)}
+                      value={config.cantidadPreguntas}
+                      onChange={(e) => setConfig({...config, cantidadPreguntas: parseInt(e.target.value)})}
+                      className="flex-grow accent-indigo-600" />
+                    <span className="font-bold text-indigo-600 bg-indigo-50 px-3 py-1 rounded-full border border-indigo-100 min-w-[3rem] text-center">
+                      {config.cantidadPreguntas}
+                    </span>
+                  </div>
+                </div>
+              )}
+
               <button onClick={handleGeneratePdf} disabled={csvData.length === 0}
                 className={`w-full flex items-center justify-center gap-2 py-4 rounded-xl font-bold shadow-lg transition-all transform active:scale-95 ${
                   csvData.length > 0 
@@ -308,6 +395,11 @@ const App: React.FC = () => {
                 }`}>
                 <Download className="w-5 h-5" />
                 Descargar Evaluación PDF
+                {modoSeleccion === 'manual' && seleccionadas.size > 0 && (
+                  <span className="bg-white/20 text-white text-xs px-2 py-0.5 rounded-full ml-1">
+                    {seleccionadas.size} preguntas
+                  </span>
+                )}
               </button>
             </div>
           </div>
@@ -318,7 +410,7 @@ const App: React.FC = () => {
               Formatos de CSV aceptados
             </h3>
             <p className="text-indigo-700 text-sm leading-relaxed mb-2">
-              <strong>Múltiple opción:</strong> columnas <code className="bg-indigo-200/50 px-1 rounded text-indigo-900">Question</code>, <code className="bg-indigo-200/50 px-1 rounded text-indigo-900">Option A</code>, <code className="bg-indigo-200/50 px-1 rounded text-indigo-900">Option B</code>, <code className="bg-indigo-200/50 px-1 rounded text-indigo-900">Option C</code>, <code className="bg-indigo-200/50 px-1 rounded text-indigo-900">Option D</code>, <code className="bg-indigo-200/50 px-1 rounded text-indigo-900">Correct Answer</code>
+              <strong>Múltiple opción:</strong> columnas <code className="bg-indigo-200/50 px-1 rounded text-indigo-900">Question</code>, <code className="bg-indigo-200/50 px-1 rounded text-indigo-900">Option A…D</code>, <code className="bg-indigo-200/50 px-1 rounded text-indigo-900">Correct Answer</code>
             </p>
             <p className="text-indigo-700 text-sm leading-relaxed">
               <strong>Abierto/Simple:</strong> columnas <code className="bg-indigo-200/50 px-1 rounded text-indigo-900">pregunta</code>, <code className="bg-indigo-200/50 px-1 rounded text-indigo-900">respuesta</code> y opcionalmente <code className="bg-indigo-200/50 px-1 rounded text-indigo-900">tema</code>, <code className="bg-indigo-200/50 px-1 rounded text-indigo-900">tipo</code>
@@ -339,13 +431,21 @@ const App: React.FC = () => {
                   </span>
                 </h2>
               </div>
-              {csvData.length > 0 && (
-                <button onClick={() => setCsvData([])}
-                  className="text-red-500 hover:text-red-700 text-sm font-medium flex items-center gap-1 transition-colors">
-                  <Trash2 className="w-4 h-4" />
-                  Vaciar banco
-                </button>
-              )}
+              <div className="flex items-center gap-3">
+                {modoSeleccion === 'manual' && csvData.length > 0 && (
+                  <button onClick={toggleTodas}
+                    className="text-indigo-600 hover:text-indigo-800 text-sm font-medium transition-colors">
+                    {seleccionadas.size === filteredQuestions.length ? 'Deseleccionar todas' : 'Seleccionar todas'}
+                  </button>
+                )}
+                {csvData.length > 0 && (
+                  <button onClick={() => { setCsvData([]); setSeleccionadas(new Set()); }}
+                    className="text-red-500 hover:text-red-700 text-sm font-medium flex items-center gap-1 transition-colors">
+                    <Trash2 className="w-4 h-4" />
+                    Vaciar banco
+                  </button>
+                )}
+              </div>
             </div>
 
             <div className="divide-y divide-slate-100 max-h-[700px] overflow-y-auto">
@@ -358,91 +458,166 @@ const App: React.FC = () => {
                   <p className="text-slate-400 text-sm">Aparecerán aquí todas tus preguntas cargadas</p>
                 </div>
               ) : (
-                filteredQuestions.map((q, idx) => (
-                  <div key={q.id} className="p-6 hover:bg-slate-50 transition-colors group">
-                    <div className="flex justify-between items-start gap-4">
-                      <div className="flex-grow">
-                        {/* Badges row */}
-                        <div className="flex items-center gap-2 mb-2 flex-wrap">
-                          <span className="bg-slate-200 text-slate-600 text-xs font-bold px-2 py-1 rounded">#{idx + 1}</span>
-                          <TipoBadge tipo={q.tipo} />
-                          {q.tema && (
-                            <span className="bg-indigo-50 text-indigo-600 text-xs font-semibold px-2 py-1 rounded border border-indigo-100 uppercase tracking-wider">
-                              {q.tema}
-                            </span>
+                filteredQuestions.map((q, idx) => {
+                  const isSelected = seleccionadas.has(q.id);
+                  const isEditing = editandoId === q.id;
+
+                  return (
+                    <div
+                      key={q.id}
+                      onClick={() => modoSeleccion === 'manual' && !isEditing && toggleSeleccion(q.id)}
+                      className={`p-6 transition-colors group relative ${
+                        modoSeleccion === 'manual' ? 'cursor-pointer' : ''
+                      } ${
+                        isSelected
+                          ? 'bg-indigo-50 border-l-4 border-indigo-500'
+                          : 'hover:bg-slate-50 border-l-4 border-transparent'
+                      }`}>
+
+                      {/* Checkbox visual en modo manual */}
+                      {modoSeleccion === 'manual' && (
+                        <div className={`absolute top-5 left-4 w-5 h-5 rounded border-2 flex items-center justify-center transition-all ${
+                          isSelected ? 'bg-indigo-600 border-indigo-600' : 'border-slate-300 bg-white'
+                        }`}>
+                          {isSelected && <span className="text-white text-xs font-bold">✓</span>}
+                        </div>
+                      )}
+
+                      <div className={`flex justify-between items-start gap-4 ${modoSeleccion === 'manual' ? 'pl-8' : ''}`}>
+                        <div className="flex-grow">
+                          {/* Badges */}
+                          <div className="flex items-center gap-2 mb-2 flex-wrap">
+                            <span className="bg-slate-200 text-slate-600 text-xs font-bold px-2 py-1 rounded">#{idx + 1}</span>
+                            <TipoBadge tipo={q.tipo} />
+                            {q.tema && !isEditing && (
+                              <span className="bg-indigo-50 text-indigo-600 text-xs font-semibold px-2 py-1 rounded border border-indigo-100 uppercase tracking-wider">
+                                {q.tema}
+                              </span>
+                            )}
+                          </div>
+
+                          {/* ── MODO EDICIÓN ── */}
+                          {isEditing ? (
+                            <div className="space-y-3 mt-2" onClick={e => e.stopPropagation()}>
+                              <div>
+                                <label className="text-xs font-semibold text-slate-500 uppercase mb-1 block">Pregunta</label>
+                                <textarea
+                                  value={editForm.pregunta}
+                                  onChange={e => setEditForm(f => ({ ...f, pregunta: e.target.value }))}
+                                  rows={3}
+                                  className="w-full px-3 py-2 rounded-lg border border-indigo-300 focus:ring-2 focus:ring-indigo-500 outline-none text-slate-800 text-sm resize-none"
+                                />
+                              </div>
+                              <div>
+                                <label className="text-xs font-semibold text-slate-500 uppercase mb-1 block">Respuesta / Clave</label>
+                                <input
+                                  type="text"
+                                  value={editForm.respuesta}
+                                  onChange={e => setEditForm(f => ({ ...f, respuesta: e.target.value }))}
+                                  className="w-full px-3 py-2 rounded-lg border border-indigo-300 focus:ring-2 focus:ring-indigo-500 outline-none text-slate-800 text-sm"
+                                />
+                              </div>
+                              <div>
+                                <label className="text-xs font-semibold text-slate-500 uppercase mb-1 block">Tema</label>
+                                <input
+                                  type="text"
+                                  value={editForm.tema}
+                                  onChange={e => setEditForm(f => ({ ...f, tema: e.target.value }))}
+                                  className="w-full px-3 py-2 rounded-lg border border-indigo-300 focus:ring-2 focus:ring-indigo-500 outline-none text-slate-800 text-sm"
+                                />
+                              </div>
+                              <div className="flex gap-2 pt-1">
+                                <button
+                                  onClick={() => saveEdit(q.id)}
+                                  className="flex items-center gap-1.5 px-4 py-2 bg-indigo-600 text-white text-sm font-semibold rounded-lg hover:bg-indigo-700 transition-colors">
+                                  <Save className="w-4 h-4" /> Guardar
+                                </button>
+                                <button
+                                  onClick={cancelEdit}
+                                  className="flex items-center gap-1.5 px-4 py-2 bg-slate-100 text-slate-600 text-sm font-semibold rounded-lg hover:bg-slate-200 transition-colors">
+                                  <X className="w-4 h-4" /> Cancelar
+                                </button>
+                              </div>
+                            </div>
+                          ) : (
+                            <>
+                              <h4 className="text-slate-800 font-medium text-lg mb-3">{q.pregunta}</h4>
+
+                              {q.tipo === 'mc' && q.opciones && (
+                                <div className="grid grid-cols-1 sm:grid-cols-2 gap-1 mb-3">
+                                  {(['a','b','c','d'] as const).map(letra => {
+                                    if (!q.opciones![letra]) return null;
+                                    const isCorrect = q.respuestaCorrecta?.toLowerCase() === letra;
+                                    return (
+                                      <div key={letra}
+                                        className={`flex items-start gap-2 px-3 py-2 rounded-lg text-sm border ${
+                                          isCorrect 
+                                          ? 'bg-emerald-50 border-emerald-200 text-emerald-800 font-semibold' 
+                                          : 'bg-slate-50 border-slate-200 text-slate-600'
+                                        }`}>
+                                        <span className="font-bold uppercase shrink-0">{letra})</span>
+                                        <span>{q.opciones![letra]}</span>
+                                        {isCorrect && <CheckCircle2 className="w-4 h-4 text-emerald-500 shrink-0 ml-auto" />}
+                                      </div>
+                                    );
+                                  })}
+                                </div>
+                              )}
+
+                              {q.tipo === 'vf' && (
+                                <div className="flex gap-3 mb-3">
+                                  <span className={`px-3 py-1 rounded-lg text-sm border font-semibold ${q.respuesta?.toLowerCase().includes('verdad') ? 'bg-emerald-50 border-emerald-200 text-emerald-700' : 'bg-slate-50 border-slate-200 text-slate-500'}`}>✓ Verdadero</span>
+                                  <span className={`px-3 py-1 rounded-lg text-sm border font-semibold ${q.respuesta?.toLowerCase().includes('fals') ? 'bg-emerald-50 border-emerald-200 text-emerald-700' : 'bg-slate-50 border-slate-200 text-slate-500'}`}>✗ Falso</span>
+                                </div>
+                              )}
+
+                              {q.tipo !== 'mc' && (
+                                <div className="bg-slate-100 p-3 rounded-lg border-l-4 border-slate-300">
+                                  <p className="text-slate-600 text-sm">
+                                    <span className="font-bold text-slate-500 text-xs uppercase block mb-1">Respuesta:</span>
+                                    {q.respuesta}
+                                  </p>
+                                </div>
+                              )}
+                              {q.tipo === 'mc' && q.justificacion && (
+                                <div className="bg-amber-50 p-3 rounded-lg border-l-4 border-amber-300 mt-2">
+                                  <p className="text-amber-800 text-sm">
+                                    <span className="font-bold text-amber-600 text-xs uppercase block mb-1">Justificación:</span>
+                                    {q.justificacion}
+                                  </p>
+                                </div>
+                              )}
+                            </>
                           )}
                         </div>
 
-                        {/* Question */}
-                        <h4 className="text-slate-800 font-medium text-lg mb-3">{q.pregunta}</h4>
-
-                        {/* Options for MC */}
-                        {q.tipo === 'mc' && q.opciones && (
-                          <div className="grid grid-cols-1 sm:grid-cols-2 gap-1 mb-3">
-                            {(['a','b','c','d'] as const).map(letra => {
-                              if (!q.opciones![letra]) return null;
-                              const isCorrect = q.respuestaCorrecta?.toLowerCase() === letra;
-                              return (
-                                <div key={letra}
-                                  className={`flex items-start gap-2 px-3 py-2 rounded-lg text-sm border ${
-                                    isCorrect 
-                                    ? 'bg-emerald-50 border-emerald-200 text-emerald-800 font-semibold' 
-                                    : 'bg-slate-50 border-slate-200 text-slate-600'
-                                  }`}>
-                                  <span className="font-bold uppercase shrink-0">{letra})</span>
-                                  <span>{q.opciones![letra]}</span>
-                                  {isCorrect && <CheckCircle2 className="w-4 h-4 text-emerald-500 shrink-0 ml-auto" />}
-                                </div>
-                              );
-                            })}
+                        {/* Acciones */}
+                        {!isEditing && (
+                          <div className="flex flex-col gap-2 opacity-0 group-hover:opacity-100 transition-opacity" onClick={e => e.stopPropagation()}>
+                            <button
+                              onClick={() => startEdit(q)}
+                              title="Editar pregunta"
+                              className="p-2 rounded-lg text-slate-500 hover:text-indigo-600 hover:bg-indigo-50 transition-colors border border-transparent hover:border-indigo-200">
+                              <Pencil className="w-5 h-5" />
+                            </button>
+                            <button
+                              onClick={() => handleImproveText(q.id)}
+                              disabled={!!isImproving}
+                              title="Mejorar redacción con IA"
+                              className={`p-2 rounded-lg text-indigo-600 hover:bg-indigo-100 transition-colors border border-transparent hover:border-indigo-200 ${isImproving === q.id.toString() ? 'animate-pulse' : ''}`}>
+                              <BrainCircuit className="w-5 h-5" />
+                            </button>
+                            <button
+                              onClick={() => removeQuestion(q.id)}
+                              className="p-2 text-slate-400 hover:text-red-500 hover:bg-red-50 rounded-lg transition-colors">
+                              <Trash2 className="w-5 h-5" />
+                            </button>
                           </div>
                         )}
-
-                        {/* VF options */}
-                        {q.tipo === 'vf' && (
-                          <div className="flex gap-3 mb-3">
-                            <span className={`px-3 py-1 rounded-lg text-sm border font-semibold ${q.respuesta?.toLowerCase().includes('verdad') ? 'bg-emerald-50 border-emerald-200 text-emerald-700' : 'bg-slate-50 border-slate-200 text-slate-500'}`}>✓ Verdadero</span>
-                            <span className={`px-3 py-1 rounded-lg text-sm border font-semibold ${q.respuesta?.toLowerCase().includes('fals') ? 'bg-emerald-50 border-emerald-200 text-emerald-700' : 'bg-slate-50 border-slate-200 text-slate-500'}`}>✗ Falso</span>
-                          </div>
-                        )}
-
-                        {/* Answer / Justification */}
-                        {q.tipo !== 'mc' && (
-                          <div className="bg-slate-100 p-3 rounded-lg border-l-4 border-slate-300">
-                            <p className="text-slate-600 text-sm">
-                              <span className="font-bold text-slate-500 text-xs uppercase block mb-1">Respuesta:</span>
-                              {q.respuesta}
-                            </p>
-                          </div>
-                        )}
-                        {q.tipo === 'mc' && q.justificacion && (
-                          <div className="bg-amber-50 p-3 rounded-lg border-l-4 border-amber-300 mt-2">
-                            <p className="text-amber-800 text-sm">
-                              <span className="font-bold text-amber-600 text-xs uppercase block mb-1">Justificación:</span>
-                              {q.justificacion}
-                            </p>
-                          </div>
-                        )}
-                      </div>
-
-                      {/* Actions */}
-                      <div className="flex flex-col gap-2 opacity-0 group-hover:opacity-100 transition-opacity">
-                        <button
-                          onClick={() => handleImproveText(q.id)}
-                          disabled={!!isImproving}
-                          title="Mejorar redacción con IA"
-                          className={`p-2 rounded-lg text-indigo-600 hover:bg-indigo-100 transition-colors border border-transparent hover:border-indigo-200 ${isImproving === q.id.toString() ? 'animate-pulse' : ''}`}>
-                          <BrainCircuit className="w-5 h-5" />
-                        </button>
-                        <button
-                          onClick={() => removeQuestion(q.id)}
-                          className="p-2 text-slate-400 hover:text-red-500 hover:bg-red-50 rounded-lg transition-colors">
-                          <Trash2 className="w-5 h-5" />
-                        </button>
                       </div>
                     </div>
-                  </div>
-                ))
+                  );
+                })
               )}
             </div>
 
